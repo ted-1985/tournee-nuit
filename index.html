@@ -53,6 +53,11 @@ h1{font-family:var(--f-display);font-weight:700;font-size:30px;line-height:1;mar
 #btnGps{min-height:64px;font-size:20px;font-family:var(--f-display);font-weight:700}
 #btnGps.busy{background:var(--accent-soft);border-color:var(--accent);color:var(--ink)}
 .dist.warn{color:var(--warn);font-weight:600}
+.pt.done{opacity:.8}
+.pt.done .n{background:#12301F;color:var(--ok)}
+.okb{display:inline-block;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--ok);border:1.5px solid var(--ok);border-radius:999px;padding:2px 9px;width:max-content}
+.gstat .d-ok{color:var(--ok)} .gstat .d-rest{color:var(--ink)}
+.toolbar select{flex:1 1 100%;min-width:0}
 .toolbar{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
 .search{flex:1 1 200px;min-width:0}
 input,select,textarea{font:inherit;color:var(--ink);background:var(--surface);border:1.5px solid var(--line);border-radius:8px;padding:12px;width:100%;min-height:48px}
@@ -145,6 +150,11 @@ h3{font-family:var(--f-display);font-size:20px;margin:8px 0 0}
     <div class="search"><input id="q" type="search" placeholder="Chercher une rue, une remarque..." autocomplete="off" aria-label="Rechercher"></div>
     <button id="btnExport" type="button">Export CSV</button>
     <button id="btnBackup" type="button">Sauvegarde</button>
+    <select id="fd" aria-label="Filtrer">
+      <option value="">Tous les points</option>
+      <option value="todo">À dépanner seulement</option>
+      <option value="done">Dépannés seulement</option>
+    </select>
   </div>
   <div id="list"></div>
 </div>
@@ -238,9 +248,11 @@ h3{font-family:var(--f-display);font-size:20px;margin:8px 0 0}
   const opened={};
 
   // ---------- base locale ----------
-  function openDb(){return new Promise((res,rej)=>{const r=indexedDB.open('tournee-nuit',1);
+  // Version 2 : partagée avec l'appli Dépannages EP (même téléphone), qui marque les points dépannés
+  function openDb(){return new Promise((res,rej)=>{const r=indexedDB.open('tournee-nuit',2);
     r.onupgradeneeded=()=>{const d=r.result;if(!d.objectStoreNames.contains('points'))d.createObjectStore('points',{keyPath:'id'});};
-    r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error);});}
+    r.onsuccess=()=>{const d=r.result;d.onversionchange=()=>{d.close();location.reload();};res(d);};r.onerror=()=>rej(r.error);});}
+  async function reloadItems(){if(!idb)return;try{items=await reqP(store('readonly').getAll());}catch(e){}}
   function store(mode){return idb.transaction('points',mode).objectStore('points');}
   function reqP(r){return new Promise((res,rej)=>{r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error);});}
   function txDone(t){return new Promise((res,rej)=>{t.oncomplete=()=>res();t.onerror=()=>rej(t.error);t.onabort=()=>rej(t.error);});}
@@ -275,37 +287,53 @@ h3{font-family:var(--f-display);font-size:20px;margin:8px 0 0}
     $('nb').textContent=items.filter(p=>p.nuit===night).length;
     const q=norm($('q').value.trim()), list=$('list');
     let rows=items.slice();
+    const fd=$('fd').value;
+    if(fd==='todo') rows=rows.filter(p=>!p.depanne); else if(fd==='done') rows=rows.filter(p=>!!p.depanne);
     if(q) rows=rows.filter(p=>norm([p.adresse,p.remarque,typeText(p)].join(' ')).includes(q));
     if(!items.length){list.innerHTML='<div class="empty"><h2>Aucun point relevé</h2><div>Au pied d\'un poteau en panne, touche « Nouveau point », puis « Ma position », choisis la panne et enregistre.</div></div>';return;}
-    if(!rows.length){list.innerHTML='<div class="empty"><h2>Aucun résultat</h2><div>Aucun point ne correspond à cette recherche.</div></div>';return;}
+    if(!rows.length){list.innerHTML='<div class="empty"><h2>Aucun résultat</h2><div>'+(fd==='todo'&&!q?'Tous les points relevés sont dépannés.':'Aucun point ne correspond à cette recherche.')+'</div></div>';return;}
     const g=new Map(); rows.forEach(p=>{if(!g.has(p.nuit))g.set(p.nuit,[]);g.get(p.nuit).push(p);});
     const nights=Array.from(g.keys()).sort().reverse();
     list.innerHTML='<div class="groups">'+nights.map(n=>{
       const arr=g.get(n).sort((a,b)=>(a.ordre||0)-(b.ordre||0));
-      const open=!!q||(opened[n]!==undefined?opened[n]:n===night);
+      const open=!!q||!!fd||(opened[n]!==undefined?opened[n]:n===night);
       const cnt={}; arr.forEach(p=>cnt[p.type]=(cnt[p.type]||0)+1);
       const stat=ORDER.filter(t=>cnt[t]).map(t=>'<span class="d-'+t+'">'+cnt[t]+' '+(t==='hs'?'HS':t==='desamorce'?'désamorce':t==='plusieurs'?'plusieurs HS':'rue éteinte')+'</span>').join('');
+      const nd=arr.filter(p=>p.depanne).length;
+      const stat2=stat+(nd?'<span class="d-ok">'+nd+' dépanné'+(nd>1?'s':'')+'</span>':'')+(arr.length-nd&&nd?'<span class="d-rest">'+(arr.length-nd)+' restant'+(arr.length-nd>1?'s':'')+'</span>':'');
       return '<section class="group"><button type="button" class="ghead" data-g="'+esc(n)+'" aria-expanded="'+open+'">'+
-        '<span><span class="gname">'+esc(nightLabel(n))+(n===night?'<span class="tag">en cours</span>':'')+'</span><span class="gstat">'+stat+'</span></span>'+
+        '<span><span class="gname">'+esc(nightLabel(n))+(n===night?'<span class="tag">en cours</span>':'')+'</span><span class="gstat">'+stat2+'</span></span>'+
         '<span class="gright">'+arr.length+' pt'+(arr.length>1?'s':'')+'<span class="chev" aria-hidden="true">&#9662;</span></span></button>'+
         (open?arr.map((p,i)=>card(p,i+1,q)).join(''):'')+'</section>';
     }).join('')+'</div>';
   }
   function card(p,n,q){
     const gps=typeof p.lat==='number';
-    return '<article class="pt"><div class="n '+esc(p.type)+'">'+n+'</div><div class="body">'+
+    return '<article class="pt'+(p.depanne?' done':'')+'"><div class="n '+esc(p.type)+'">'+n+'</div><div class="body">'+
       '<div class="ty '+esc(p.type)+'">'+esc(typeText(p))+'</div>'+
+      (p.depanne?'<span class="okb">Dépanné le '+esc(fmtDay(p.depanne.jour).slice(0,5))+'</span>':'')+
       '<div class="addr">'+(p.adresse?hl(p.adresse,q):(p.adressePending?'Adresse en attente de réseau':(gps?'Adresse inconnue':'Sans position GPS')))+'</div>'+
       (p.remarque?'<div class="rem">'+hl(p.remarque,q)+'</div>':'')+
       '<div class="acts">'+(gps?'<a class="btn" target="_blank" rel="noopener" href="'+esc(mapsUrl(p))+'">Voir sur la carte</a>':'')+
-      '<button type="button" data-edit="'+esc(p.id)+'">Modifier</button></div></div></article>';
+      '<button type="button" data-edit="'+esc(p.id)+'">Modifier</button>'+
+      '<button type="button" data-dep="'+esc(p.id)+'">'+(p.depanne?'Annuler dépanné':'Marquer dépanné')+'</button></div></div></article>';
   }
   $('list').addEventListener('click',e=>{
     const g=e.target.closest('[data-g]');
     if(g){if($('q').value.trim())return;const n=g.getAttribute('data-g');const was=opened[n]!==undefined?opened[n]:n===currentNight();opened[n]=!was;render();return;}
+    const d=e.target.closest('[data-dep]');
+    if(d){toggleDepanne(d.getAttribute('data-dep'));return;}
     const b=e.target.closest('[data-edit]'); if(b) openEdit(b.getAttribute('data-edit'));
   });
+  async function toggleDepanne(id){
+    await reloadItems(); const p=items.find(x=>x.id===id); if(!p)return;
+    p.depanne=p.depanne?null:{jour:ymd(new Date()),depannageId:null,manuel:true};
+    try{await put(p);markDirty();render();toast(p.depanne?'Point marqué dépanné':'Point remis à dépanner');}catch(e){toast("Échec de l'enregistrement");}
+  }
   $('q').addEventListener('input',render);
+  $('fd').addEventListener('change',render);
+  // l'appli Dépannages peut avoir marqué des points : on relit en revenant sur l'appli
+  document.addEventListener('visibilitychange',async()=>{if(!document.hidden&&$('sheet').hidden){await reloadItems();render();}});
 
   // ---------- adresse ----------
   async function reverseGeocode(lat,lon){
@@ -427,6 +455,7 @@ h3{font-family:var(--f-display);font-size:20px;margin:8px 0 0}
     if(typeof cur.lat!=='number'&&!cur.adresse&&!cur.remarque){err.textContent='Prends la position, ou écris au moins une adresse ou une remarque.';err.hidden=false;return;}
     if(isNew) cur.ordre=items.filter(x=>x.nuit===cur.nuit).reduce((m,x)=>Math.max(m,x.ordre||0),0)+1;
     try{
+      if(!isNew){const fresh=await reqP(store('readonly').get(cur.id)); cur.depanne=fresh?fresh.depanne||null:cur.depanne||null;}
       await put(cur);
       const i=items.findIndex(x=>x.id===cur.id); if(i>=0)items[i]=cur; else items.push(cur);
       markDirty(); opened[cur.nuit]=true;
@@ -452,8 +481,8 @@ h3{font-family:var(--f-display);font-size:20px;margin:8px 0 0}
   function csvCell(v){v=v==null?'':String(v);return /[",\n;]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;}
   function rowsFor(p){let r=items.slice();if(p!=='all')r=r.filter(x=>x.nuit===p);return r.sort((a,b)=>a.nuit<b.nuit?-1:a.nuit>b.nuit?1:(a.ordre||0)-(b.ordre||0));}
   function buildCsv(rows){
-    const lines=['nuit_du,n,type,nombre,adresse,lat,lon,precision_m,remarque'];
-    rows.forEach(p=>lines.push([fmtDay(p.nuit),p.ordre,TYPES[p.type],p.nombre||'',p.adresse,typeof p.lat==='number'?p.lat:'',typeof p.lon==='number'?p.lon:'',p.precision||'',p.remarque].map(csvCell).join(',')));
+    const lines=['nuit_du,n,type,nombre,adresse,lat,lon,precision_m,remarque,depanne_le'];
+    rows.forEach(p=>lines.push([fmtDay(p.nuit),p.ordre,TYPES[p.type],p.nombre||'',p.adresse,typeof p.lat==='number'?p.lat:'',typeof p.lon==='number'?p.lon:'',p.precision||'',p.remarque,p.depanne?fmtDay(p.depanne.jour):''].map(csvCell).join(',')));
     return lines.join('\n');
   }
   function refreshExport(){const r=rowsFor($('expPeriod').value);$('expInfo').textContent=r.length+' point'+(r.length>1?'s':'')+' dans ce fichier.';$('expText').value=buildCsv(r);}
@@ -510,7 +539,7 @@ h3{font-family:var(--f-display);font-size:20px;margin:8px 0 0}
     }catch(e){const s=$('status');s.hidden=false;s.textContent="Impossible d'ouvrir l'enregistrement sur ce téléphone. Ouvre l'appli dans Chrome (pas en navigation privée).";}
   })();
   // la nuit en cours change à midi : rafraîchir l'en-tête de temps en temps
-  setInterval(()=>{if($('sheet').hidden)render();},5*60*1000);
+  setInterval(async()=>{if($('sheet').hidden&&!document.hidden){await reloadItems();render();}},5*60*1000);
   if('serviceWorker' in navigator){window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));}
 })();
 </script>
